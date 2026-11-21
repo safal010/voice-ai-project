@@ -1,0 +1,7 @@
+venv/
+.env
+.env.local
+agent-secrets.env
+__pycache__/
+node_modules/
+.next/
