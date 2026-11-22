@@ -78,3 +78,4 @@ README.md
 screenshot.png
 check_env.py
 test_keys.py
+agent-secrets.env
