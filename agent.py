@@ -185,15 +185,14 @@ Rules:
 server = AgentServer()
 
 
-def find_owner_id(room) -> str:
+def parse_owner_id(metadata: str | None) -> str:
     """Read the anonymous owner ID that the web page put in the visitor's token."""
-    for participant in room.remote_participants.values():
-        try:
-            owner = json.loads(participant.metadata or "{}").get("ownerId")
-        except ValueError:
-            continue
-        if isinstance(owner, str) and 8 <= len(owner) <= 64:
-            return owner
+    try:
+        owner = json.loads(metadata or "{}").get("ownerId")
+    except ValueError:
+        return "anonymous"
+    if isinstance(owner, str) and 8 <= len(owner) <= 64:
+        return owner
     return "anonymous"
 
 
@@ -202,7 +201,13 @@ async def my_agent(ctx: agents.JobContext):
     cfg = LANGUAGES[LANGUAGE]
 
     await ctx.connect()
-    owner_id = find_owner_id(ctx.room)
+    owner_id = "anonymous"
+    try:
+        participant = await asyncio.wait_for(ctx.wait_for_participant(), timeout=10)
+        owner_id = parse_owner_id(participant.metadata)
+        logger.info("visitor metadata present: %s", bool(participant.metadata))
+    except asyncio.TimeoutError:
+        logger.warning("No visitor joined within 10 seconds")
 
     session = AgentSession(
         stt=inference.STT(**cfg["stt"]),
