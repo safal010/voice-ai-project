@@ -1,3 +1,6 @@
+import asyncio
+import json
+import logging
 import xml.etree.ElementTree as ET
 from datetime import datetime
 
@@ -5,9 +8,17 @@ import aiohttp
 from dotenv import load_dotenv
 from livekit import agents
 from livekit.agents import AgentServer, AgentSession, Agent, RunContext, function_tool, inference
+from livekit.agents.llm import ChatMessage
 from livekit.plugins import silero
 
+import db
+
 load_dotenv()
+
+logger = logging.getLogger("asha")
+
+# Change this to "en" or "hi" to switch Asha's language.
+LANGUAGE = "en"
 
 NEWS_FEEDS = {
     "world": "https://feeds.bbci.co.uk/news/world/rss.xml",
@@ -16,19 +27,51 @@ NEWS_FEEDS = {
     "science": "https://feeds.bbci.co.uk/news/science_and_environment/rss.xml",
 }
 
+LANGUAGES = {
+    "en": {
+        "stt": dict(model="assemblyai/universal-3-5-pro", language="en"),
+        "tts": dict(
+            model="fishaudio/s2.1-pro",
+            voice="fa4c9eb3dccc4806b382b40d61c6b10a",
+        ),
+        "persona": """
+You are Asha, a warm and curious voice assistant who helps people practice
+speaking English and learn new things.
+Speak in short, natural English sentences.
+If the user makes an English mistake, gently repeat the correct version once,
+then carry on.
+""",
+        "greeting": "Introduce yourself as Asha in one short sentence and ask what the user would like to talk about today.",
+    },
+    "hi": {
+        "stt": dict(model="deepgram/nova-3", language="hi"),
+        "tts": dict(
+            model="cartesia/sonic-3",
+            voice="9626c31c-bec5-4cca-baa8-f8ba9e84c8bc",
+            language="hi",
+        ),
+        "persona": """
+You are Asha, a warm and curious voice assistant.
+Always speak in simple, natural Hindi, written in Devanagari script, like a
+friendly person on a phone call. If the user speaks English, still answer in
+Hindi, and you may keep common English words that people use in everyday Hindi.
+Never write Hindi in Roman letters, because your words are spoken out loud.
+""",
+        "greeting": "Introduce yourself as Asha in one short sentence in Hindi and ask what the user would like to talk about today.",
+    },
+}
+
 
 class Assistant(Agent):
-    def __init__(self) -> None:
+    def __init__(self, persona: str) -> None:
         today = datetime.now().astimezone().strftime("%A, %d %B %Y")
         super().__init__(
             instructions=f"""
 Today's date is {today}.
 
-You are Asha, a warm and curious voice assistant who helps people practice
-speaking English and learn new things.
+{persona}
 
 How to talk:
-- Speak in short, natural sentences, like a friendly person on a phone call.
 - Keep replies to one to three sentences unless the user asks for more.
 - Ask one follow-up question at a time to keep the conversation going.
 - Never use bullet points, lists, emojis, or special symbols. Your words are
@@ -36,8 +79,6 @@ How to talk:
 
 Rules:
 - If you don't know something, say so honestly.
-- If the user makes an English mistake, gently repeat the correct version once,
-  then carry on.
 - If the user asks for the current time or date, use the get_current_time tool
   instead of guessing.
 - Your training knowledge is out of date. For anything that can change, such as
@@ -45,14 +86,13 @@ Rules:
   memory. Use a tool first.
 - Use get_news for headlines and what is happening in the world right now.
 - Use search_wikipedia for facts about people, places, offices, organizations,
-  and topics. Search with a short subject, for example "President of the
-  United States", not a full question.
+  and topics. Search with a short English subject, for example "President of
+  the United States", not a full question.
 - Tool results can be incomplete. If the tools do not give a clear answer, say
   you are not sure instead of guessing.
-- When you share news, pick the two or three most interesting stories, say
-  them in your own simple words, and mention that the source is BBC News.
-- When you share facts from Wikipedia, say them in your own simple words and
-  mention that the source is Wikipedia.
+- Tool results are in English. When you share them, say them in your own simple
+  words in the language you are speaking, and mention the source (BBC News or
+  Wikipedia).
 """
         )
 
@@ -145,22 +185,83 @@ Rules:
 server = AgentServer()
 
 
+def find_owner_id(room) -> str:
+    """Read the anonymous owner ID that the web page put in the visitor's token."""
+    for participant in room.remote_participants.values():
+        try:
+            owner = json.loads(participant.metadata or "{}").get("ownerId")
+        except ValueError:
+            continue
+        if isinstance(owner, str) and 8 <= len(owner) <= 64:
+            return owner
+    return "anonymous"
+
+
 @server.rtc_session()
 async def my_agent(ctx: agents.JobContext):
+    cfg = LANGUAGES[LANGUAGE]
+
+    await ctx.connect()
+    owner_id = find_owner_id(ctx.room)
+
     session = AgentSession(
-        stt=inference.STT(model="assemblyai/universal-3-5-pro", language="en"),
+        stt=inference.STT(**cfg["stt"]),
         llm=inference.LLM(model="google/gemma-4-31b-it"),
-        tts=inference.TTS(
-            model="fishaudio/s2.1-pro",
-            voice="fa4c9eb3dccc4806b382b40d61c6b10a",
-        ),
+        tts=inference.TTS(**cfg["tts"]),
         vad=silero.VAD.load(),
     )
 
-    await session.start(room=ctx.room, agent=Assistant())
-    await session.generate_reply(
-        instructions="Introduce yourself as Asha in one short sentence and ask what the user would like to talk about today."
-    )
+    # ---- Save the conversation to PostgreSQL ----
+    # If the database is down, Asha still talks; she just doesn't save.
+    pool = None
+    conversation_id = None
+    try:
+        pool = await db.connect()
+        conversation_id = await db.create_conversation(
+            pool, ctx.job.room.name, owner_id, LANGUAGE
+        )
+    except Exception:
+        logger.exception("Database unavailable, this conversation will not be saved")
+
+    if conversation_id is not None:
+        queue: asyncio.Queue = asyncio.Queue()
+
+        async def writer():
+            # One worker saves messages one by one, so they stay in order.
+            while True:
+                role, content = await queue.get()
+                try:
+                    await db.add_message(pool, conversation_id, role, content)
+                except Exception:
+                    logger.exception("Could not save a message")
+                finally:
+                    queue.task_done()
+
+        writer_task = asyncio.create_task(writer())
+
+        @session.on("conversation_item_added")
+        def on_item_added(ev):
+            item = ev.item
+            if not isinstance(item, ChatMessage):
+                return
+            if item.role not in ("user", "assistant"):
+                return
+            text = (item.text_content or "").strip()
+            if text:
+                queue.put_nowait((item.role, text))
+
+        async def cleanup():
+            try:
+                await asyncio.wait_for(queue.join(), timeout=5)
+            except asyncio.TimeoutError:
+                pass
+            writer_task.cancel()
+            await pool.close()
+
+        ctx.add_shutdown_callback(cleanup)
+
+    await session.start(room=ctx.room, agent=Assistant(cfg["persona"]))
+    await session.generate_reply(instructions=cfg["greeting"])
 
 
 if __name__ == "__main__":
