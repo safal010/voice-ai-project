@@ -13,8 +13,8 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "AI Voice Chat",
-  description: "Talk to an AI voice assistant in real time",
+  title: "Voice AI",
+  description: "A private, real-time voice conversation with your AI assistant",
 };
 
 export default function RootLayout({ children }: LayoutProps<"/">) {

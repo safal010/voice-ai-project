@@ -34,9 +34,11 @@ type ConversationDetail = ConversationSummary & { messages: SavedMessage[] };
 const STATUS_LABELS: Record<string, string> = {
   connecting: "Connecting...",
   initializing: "Waking up the assistant (this can take a minute)...",
-  listening: "Listening",
-  thinking: "Thinking",
-  speaking: "Speaking",
+  listening: "Listening...",
+  thinking: "Thinking...",
+  speaking: "AI is speaking...",
+  idle: "Online",
+  disconnected: "Tap to speak",
 };
 
 function getOwnerId(): string {
@@ -80,7 +82,7 @@ function Icon({
   name,
   size = 18,
 }: {
-  name: "spark" | "history" | "arrow" | "mic" | "phone" | "lock" | "clock" | "edit" | "trash" | "close";
+  name: "spark" | "history" | "arrow" | "mic" | "phone" | "lock" | "clock" | "edit" | "trash" | "close" | "settings" | "plus";
   size?: number;
 }) {
   const common = {
@@ -163,6 +165,19 @@ function Icon({
           <path d="m6 6 12 12M18 6 6 18" />
         </svg>
       );
+    case "settings":
+      return (
+        <svg {...common}>
+          <path d="M12 8.5a3.5 3.5 0 1 0 0 7 3.5 3.5 0 0 0 0-7Z" />
+          <path d="m19.4 15 .1.1a1.8 1.8 0 0 1-2.5 2.5l-.1-.1a1.8 1.8 0 0 0-3 .9v.2a1.8 1.8 0 0 1-3.6 0v-.2a1.8 1.8 0 0 0-3-.9l-.1.1a1.8 1.8 0 0 1-2.5-2.5l.1-.1a1.8 1.8 0 0 0-.9-3h-.2a1.8 1.8 0 0 1 0-3.6h.2a1.8 1.8 0 0 0 .9-3l-.1-.1a1.8 1.8 0 0 1 2.5-2.5l.1.1a1.8 1.8 0 0 0 3-.9v-.2a1.8 1.8 0 0 1 3.6 0v.2a1.8 1.8 0 0 0 3 .9l.1-.1a1.8 1.8 0 0 1 2.5 2.5l-.1.1a1.8 1.8 0 0 0 .9 3h.2a1.8 1.8 0 0 1 0 3.6h-.2a1.8 1.8 0 0 0-.9 3Z" />
+        </svg>
+      );
+    case "plus":
+      return (
+        <svg {...common}>
+          <path d="M12 5v14M5 12h14" />
+        </svg>
+      );
   }
 }
 
@@ -173,7 +188,7 @@ function Transcript() {
 
   useEffect(() => {
     const box = boxRef.current;
-    if (box) box.scrollTop = box.scrollHeight;
+    if (box) box.scrollTo({ top: box.scrollHeight, behavior: "smooth" });
   }, [transcriptions]);
 
   return (
@@ -218,10 +233,41 @@ function Transcript() {
   );
 }
 
-function VoiceUI({ onDisconnect }: { onDisconnect: () => void }) {
+function VoiceUI({
+  onDisconnect,
+  onStatusChange,
+  onMicrophoneChange,
+  onRegisterMicrophoneToggle,
+}: {
+  onDisconnect: () => void;
+  onStatusChange: (status: string) => void;
+  onMicrophoneChange: (enabled: boolean) => void;
+  onRegisterMicrophoneToggle: (toggle: (() => void) | null) => void;
+}) {
   const { state, audioTrack } = useVoiceAssistant();
   const { localParticipant, isMicrophoneEnabled } = useLocalParticipant();
   const [elapsedSeconds, setElapsedSeconds] = useState(0);
+  const [microphoneError, setMicrophoneError] = useState("");
+
+  const toggleMicrophone = useCallback(() => {
+    setMicrophoneError("");
+    void localParticipant
+      .setMicrophoneEnabled(!isMicrophoneEnabled)
+      .catch(() => setMicrophoneError("Microphone access failed. Check your browser permissions and try again."));
+  }, [isMicrophoneEnabled, localParticipant]);
+
+  useEffect(() => {
+    onStatusChange(state);
+  }, [onStatusChange, state]);
+
+  useEffect(() => {
+    onMicrophoneChange(isMicrophoneEnabled);
+  }, [isMicrophoneEnabled, onMicrophoneChange]);
+
+  useEffect(() => {
+    onRegisterMicrophoneToggle(toggleMicrophone);
+    return () => onRegisterMicrophoneToggle(null);
+  }, [onRegisterMicrophoneToggle, toggleMicrophone]);
 
   useEffect(() => {
     const intervalId = window.setInterval(() => {
@@ -239,9 +285,8 @@ function VoiceUI({ onDisconnect }: { onDisconnect: () => void }) {
     <section className="call-view" aria-label="Live call with Asha">
       <div className="call-heading">
         <div>
-          <span className="eyebrow">YOUR ENGLISH PRACTICE SESSION</span>
-          <h1>A little conversation goes a long way.</h1>
-          <p>Speak naturally. Asha is here to listen and help you practice.</p>
+          <span className="eyebrow">VOICE SESSION</span>
+          <h1>Here with you.</h1>
         </div>
         <div className="call-clock" aria-label={`Call duration ${minutes}:${seconds}`}>
           <Icon name="clock" size={15} />
@@ -253,7 +298,7 @@ function VoiceUI({ onDisconnect }: { onDisconnect: () => void }) {
         <section className="assistant-panel" aria-label="Asha voice assistant">
           <div className="assistant-status" data-state={state} aria-live="polite">
             <span className="status-dot" />
-            {STATUS_LABELS[state] ?? "Waiting for Asha..."}
+            {STATUS_LABELS[state] ?? "Tap to speak"}
           </div>
           <div className={`voice-orb state-${state}`} aria-hidden="true">
             <span className="orb-ring orb-ring-outer" />
@@ -261,36 +306,13 @@ function VoiceUI({ onDisconnect }: { onDisconnect: () => void }) {
             <div className="orb-core">
               <span className="orb-glow" />
               <div className="orb-visualizer" data-lk-theme="default">
-                <BarVisualizer state={state} barCount={7} trackRef={audioTrack} />
+                <BarVisualizer state={state} barCount={9} trackRef={audioTrack} />
               </div>
             </div>
           </div>
           <div className="voice-caption">
             <h2>Asha</h2>
-            <p>Your friendly English practice partner</p>
-          </div>
-          <div className="call-controls">
-            <button
-              className={`control-button microphone-control ${isMicrophoneEnabled ? "" : "is-muted"}`}
-              onClick={() =>
-                localParticipant.setMicrophoneEnabled(!isMicrophoneEnabled)
-              }
-              aria-label={isMicrophoneEnabled ? "Mute microphone" : "Unmute microphone"}
-              aria-pressed={!isMicrophoneEnabled}
-              title={isMicrophoneEnabled ? "Mute microphone" : "Unmute microphone"}
-            >
-              <Icon name="mic" size={17} />
-              <span>{isMicrophoneEnabled ? "Mute" : "Unmute"}</span>
-            </button>
-            <button
-              className="control-button end-call-control"
-              onClick={onDisconnect}
-              aria-label="End call"
-              title="End call"
-            >
-              <Icon name="phone" size={17} />
-              <span>End call</span>
-            </button>
+            <p>Your voice companion</p>
           </div>
         </section>
 
@@ -308,9 +330,39 @@ function VoiceUI({ onDisconnect }: { onDisconnect: () => void }) {
           <Transcript />
           <div className="transcript-footer">
             <Icon name="lock" size={14} />
-            <span>Your conversation is private to this browser.</span>
+            <span>Your conversation is saved privately in this browser.</span>
           </div>
         </section>
+      </div>
+      <div className="voice-control-panel">
+        <p className="control-status" data-state={state} aria-live="polite">
+          <span className="status-dot" />
+          {STATUS_LABELS[state] ?? "Tap to speak"}
+        </p>
+        <div className="voice-control-actions">
+          <div className="control-spacer" aria-hidden="true" />
+          <button
+            className={`microphone-control state-${state} ${isMicrophoneEnabled ? "" : "is-muted"}`}
+            onClick={toggleMicrophone}
+            aria-label={isMicrophoneEnabled ? "Mute microphone" : "Unmute microphone"}
+            aria-pressed={isMicrophoneEnabled}
+            title={isMicrophoneEnabled ? "Mute microphone" : "Unmute microphone"}
+          >
+            <Icon name="mic" size={25} />
+          </button>
+          <button
+            className="end-call-control"
+            onClick={onDisconnect}
+            aria-label="End conversation"
+            title="End conversation"
+          >
+            <Icon name="phone" size={17} />
+            <span>End</span>
+          </button>
+        </div>
+        <p className={`microphone-hint ${microphoneError ? "has-error" : ""}`} role={microphoneError ? "alert" : undefined}>
+          {microphoneError || (isMicrophoneEnabled ? "Microphone on · tap to mute" : "Microphone muted · tap to unmute")}
+        </p>
       </div>
     </section>
   );
@@ -579,10 +631,20 @@ export default function Page() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [showHistory, setShowHistory] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [assistantStatus, setAssistantStatus] = useState("idle");
+  const [microphoneEnabled, setMicrophoneEnabled] = useState(true);
+  const microphoneToggleRef = useRef<(() => void) | null>(null);
+  const activeTokenRef = useRef<string | null>(null);
+
+  const registerMicrophoneToggle = useCallback((toggle: (() => void) | null) => {
+    microphoneToggleRef.current = toggle;
+  }, []);
 
   async function connect() {
     setLoading(true);
     setError("");
+    setAssistantStatus("connecting");
     try {
       const res = await fetch("/api/token", {
         method: "POST",
@@ -591,49 +653,127 @@ export default function Page() {
       });
       if (!res.ok) throw new Error("Could not get a token");
       const data = await res.json();
+      activeTokenRef.current = data.token;
       setConnection({ token: data.token, url: data.url });
     } catch {
       setError("Connection failed. Is the server running?");
+      setAssistantStatus("idle");
     } finally {
       setLoading(false);
     }
   }
 
+  function disconnect() {
+    activeTokenRef.current = null;
+    setConnection(null);
+    setAssistantStatus("idle");
+    setMicrophoneEnabled(true);
+  }
+
+  async function startNewConversation() {
+    setShowHistory(false);
+    setSettingsOpen(false);
+    if (connection) disconnect();
+    await connect();
+  }
+
   return (
     <main className="app-shell">
       <header className="topbar">
-        <div className="brand" aria-label="Asha">
+        <div className="brand" aria-label="Voice AI">
           <span className="brand-mark"><Icon name="spark" size={19} /></span>
-          <span className="brand-name">asha<span>.</span></span>
+          <span className="brand-name">Voice AI</span>
         </div>
         <div className="topbar-right">
-          <span className="availability"><i /> AI voice companion</span>
-          {!connection && (
+          <span className={`availability ${connection ? "is-active" : ""}`}>
+            <i />
+            <span>{connection ? STATUS_LABELS[assistantStatus] ?? "Connecting..." : "Online"}</span>
+          </span>
+          <button className="new-conversation-button" onClick={() => void startNewConversation()} disabled={loading}>
+            <Icon name="plus" size={16} />
+            <span>New conversation</span>
+          </button>
+          <button
+            className={`icon-button ${settingsOpen ? "is-active" : ""}`}
+            onClick={() => setSettingsOpen((open) => !open)}
+            aria-label="Voice settings"
+            aria-expanded={settingsOpen}
+            title="Voice settings"
+          >
+            <Icon name="settings" size={17} />
+          </button>
+          {!connection && !showHistory && (
             <button
-              className={`history-nav ${showHistory ? "is-active" : ""}`}
-              onClick={() => setShowHistory((visible) => !visible)}
-              aria-pressed={showHistory}
+              className="icon-button history-nav"
+              onClick={() => setShowHistory(true)}
+              aria-label="Conversation history"
+              title="Conversation history"
             >
               <Icon name="history" size={16} />
-              <span>{showHistory ? "Home" : "History"}</span>
             </button>
           )}
         </div>
       </header>
 
       <div className="app-content">
+        {settingsOpen && (
+          <div className="settings-backdrop" onClick={() => setSettingsOpen(false)}>
+            <section
+              className="settings-panel"
+              role="dialog"
+              aria-modal="true"
+              aria-labelledby="settings-title"
+              onClick={(event) => event.stopPropagation()}
+            >
+              <div className="settings-heading">
+                <div>
+                  <span className="eyebrow">PREFERENCES</span>
+                  <h2 id="settings-title">Voice settings</h2>
+                </div>
+                <button className="icon-button" onClick={() => setSettingsOpen(false)} aria-label="Close settings">
+                  <Icon name="close" size={17} />
+                </button>
+              </div>
+              <div className="settings-option">
+                <div>
+                  <strong>Microphone</strong>
+                  <p>{connection ? (microphoneEnabled ? "On and ready to listen" : "Muted for this conversation") : "Browser audio is ready when you start a conversation"}</p>
+                </div>
+                {connection && (
+                  <button
+                    className={`settings-toggle ${microphoneEnabled ? "is-on" : ""}`}
+                    onClick={() => microphoneToggleRef.current?.()}
+                    aria-label={microphoneEnabled ? "Mute microphone" : "Unmute microphone"}
+                    aria-pressed={microphoneEnabled}
+                  >
+                    <span />
+                  </button>
+                )}
+              </div>
+              <p className="settings-footnote">Your conversation stays private to this browser.</p>
+            </section>
+          </div>
+        )}
         {showHistory ? (
           <History onBack={() => setShowHistory(false)} />
         ) : connection ? (
           <LiveKitRoom
+            key={connection.token}
             serverUrl={connection.url}
             token={connection.token}
             connect={true}
             audio={true}
             video={false}
-            onDisconnected={() => setConnection(null)}
+            onDisconnected={() => {
+              if (activeTokenRef.current === connection.token) disconnect();
+            }}
           >
-            <VoiceUI onDisconnect={() => setConnection(null)} />
+            <VoiceUI
+              onDisconnect={disconnect}
+              onStatusChange={setAssistantStatus}
+              onMicrophoneChange={setMicrophoneEnabled}
+              onRegisterMicrophoneToggle={registerMicrophoneToggle}
+            />
             <RoomAudioRenderer />
           </LiveKitRoom>
         ) : (
@@ -674,11 +814,6 @@ export default function Page() {
           </section>
         )}
       </div>
-      <footer className="app-footer">
-        <span>Made for curious minds <span className="footer-spark">✦</span></span>
-        <span className="footer-divider" />
-        <span>Voice-powered English practice</span>
-      </footer>
     </main>
   );
 }
